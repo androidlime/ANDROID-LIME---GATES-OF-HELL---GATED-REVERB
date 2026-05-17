@@ -17,7 +17,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "Android Likes EnVerb"; }
+    const juce::String getName() const override { return "Gates of Hell"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 5.0; }
@@ -77,7 +77,11 @@ private:
 
 public:
     std::atomic<bool>  pendingFlush    { false };
-    std::atomic<float> envLevelAtomic { 0.f };
+    std::atomic<float> envLevelAtomic  { 0.f };
+    std::atomic<float> beatPhaseAtomic { -1.f }; // -1 = not playing
+
+    static constexpr int NMOD = 11;
+    std::array<std::atomic<float>, NMOD> modAmts {}; // per-param depth, 0=off, 1=full
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EVProcessor)
 };

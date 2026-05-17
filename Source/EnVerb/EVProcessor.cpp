@@ -147,6 +147,21 @@ void EVProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
 void EVProcessor::releaseResources() {}
 
+struct ModParamInfo { const char* id; float lo, hi; };
+static const ModParamInfo kModParams[] = {
+    {"roomsize",     0.f,    100.f},  // 0
+    {"damping",      0.f,    100.f},  // 1
+    {"diffuse",      0.f,    200.f},  // 2
+    {"holdsize",     1.f,   2600.f},  // 3
+    {"inputamt",     0.f,    100.f},  // 4
+    {"spread",       0.f,    200.f},  // 5
+    {"highcut",   1000.f,  12000.f},  // 6
+    {"crossover",  100.f,   1000.f},  // 7
+    {"lowfreqlevel",-100.f,   12.f},  // 8
+    {"resonance",    0.f,    100.f},  // 9
+    {"moddepth",     0.f,    100.f},  // 10
+};
+
 void EVProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals ndn;
@@ -167,18 +182,26 @@ void EVProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffe
         loopWritePos = 0;
     }
 
-    const float roomSize    = *apvts.getRawParameterValue("roomsize")    / 100.f;
-    const float damping     = *apvts.getRawParameterValue("damping")     / 100.f;
-    const float diffuse     = *apvts.getRawParameterValue("diffuse")     / 100.f;
-    const float dryG        = *apvts.getRawParameterValue("dry")         / 100.f;
-    const float wetG        = *apvts.getRawParameterValue("wet")         / 100.f;
-    const float spreadN     = *apvts.getRawParameterValue("spread")      / 100.f;
-    const float highCutHz   = *apvts.getRawParameterValue("highcut");
-    const float crossoverHz = *apvts.getRawParameterValue("crossover");
+    // Envelope-driven parameter modulation — per-param depth
+    auto modParam = [&](int idx, float raw) -> float {
+        const float depth = modAmts[idx].load();
+        if (std::abs(depth) < 0.0001f) return raw;
+        const auto& mp = kModParams[idx];
+        return juce::jlimit(mp.lo, mp.hi, raw + envLevel * depth * (mp.hi - mp.lo));
+    };
+
+    const float roomSize    = modParam(0, *apvts.getRawParameterValue("roomsize"))    / 100.f;
+    const float damping     = modParam(1, *apvts.getRawParameterValue("damping"))     / 100.f;
+    const float diffuse     = modParam(2, *apvts.getRawParameterValue("diffuse"))     / 100.f;
+    const float dryG        = *apvts.getRawParameterValue("dry")                      / 100.f;
+    const float wetG        = *apvts.getRawParameterValue("wet")                      / 100.f;
+    const float spreadN     = modParam(5, *apvts.getRawParameterValue("spread"))      / 100.f;
+    const float highCutHz   = modParam(6, *apvts.getRawParameterValue("highcut"));
+    const float crossoverHz = modParam(7, *apvts.getRawParameterValue("crossover"));
     const float lowFreqGain = juce::Decibels::decibelsToGain(
-                                  apvts.getRawParameterValue("lowfreqlevel")->load());
-    const float inputAmount = *apvts.getRawParameterValue("inputamt") / 100.f;
-    const float holdSizeMs  = *apvts.getRawParameterValue("holdsize");
+                                  modParam(8, apvts.getRawParameterValue("lowfreqlevel")->load()));
+    const float inputAmount = modParam(4, *apvts.getRawParameterValue("inputamt"))    / 100.f;
+    const float holdSizeMs  = modParam(3, *apvts.getRawParameterValue("holdsize"));
     const int   loopLen     = juce::jmax(1,
         juce::jmin((int)(holdSizeMs * 0.001f * (float)sr), loopBufSize - 1));
 
@@ -194,11 +217,11 @@ void EVProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffe
     const float w1 = 0.5f + spreadN * 0.5f;
     const float w2 = (1.f - spreadN) * 0.5f;
 
-    const float resoBlend = *apvts.getRawParameterValue("resonance") / 100.f;
+    const float resoBlend = modParam(9,  *apvts.getRawParameterValue("resonance")) / 100.f;
 
     // Spring/plate LFO — modulate allpass delay times per block
     const float modRate  = *apvts.getRawParameterValue("modrate");
-    const float modDepth = *apvts.getRawParameterValue("moddepth") / 100.f;
+    const float modDepth = modParam(10, *apvts.getRawParameterValue("moddepth")) / 100.f;
     lfoPhase = std::fmod(lfoPhase + modRate * (float)NS / (float)sr, 1.f);
     for (int i = 0; i < NAP; ++i)
     {
@@ -360,7 +383,8 @@ void EVProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffe
         if (CH > 1) buffer.setSample(1, s, softClip(inR * dryG + (hcStateR * w1 + hcStateL * w2) * wetG * env));
     }
 
-    envLevelAtomic.store(envLevel);
+    envLevelAtomic .store(envLevel);
+    beatPhaseAtomic.store(isPlaying ? (float)beatPhase : -1.f);
 }
 
 static constexpr int STATE_VERSION = 1;
@@ -369,6 +393,10 @@ void EVProcessor::getStateInformation(juce::MemoryBlock& dest)
 {
     auto state = apvts.copyState();
     state.setProperty("stateVersion", STATE_VERSION, nullptr);
+    juce::String modStr;
+    for (int i = 0; i < NMOD; ++i)
+        modStr += juce::String(modAmts[i].load()) + ";";
+    state.setProperty("modAmts", modStr, nullptr);
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
     copyXmlToBinary(*xml, dest);
 }
@@ -380,7 +408,16 @@ void EVProcessor::setStateInformation(const void* data, int size)
     {
         auto state = juce::ValueTree::fromXml(*xml);
         if ((int)state.getProperty("stateVersion", 0) >= STATE_VERSION)
+        {
             apvts.replaceState(state);
+            auto modStr = state.getProperty("modAmts", "").toString();
+            if (modStr.isNotEmpty())
+            {
+                auto tokens = juce::StringArray::fromTokens(modStr, ";", "");
+                for (int i = 0; i < juce::jmin(NMOD, tokens.size()); ++i)
+                    modAmts[i].store(tokens[i].getFloatValue());
+            }
+        }
     }
 }
 

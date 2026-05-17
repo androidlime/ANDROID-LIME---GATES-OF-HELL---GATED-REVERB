@@ -11,14 +11,14 @@ FetchContent_MakeAvailable(JUCE)
 
 # ── Metallic EnVerb ────────────────────────────────────────────────────────
 juce_add_plugin(MetallicEnVerb
-    COMPANY_NAME            "YourName"
+    COMPANY_NAME            "androidlime"
     IS_SYNTH                FALSE
     NEEDS_MIDI_INPUT        FALSE
     NEEDS_MIDI_OUTPUT       FALSE
     PLUGIN_MANUFACTURER_CODE Yrnm
     PLUGIN_CODE             ANLE
     FORMATS                 VST3 Standalone
-    PRODUCT_NAME            "Android Likes EnVerb"
+    PRODUCT_NAME            "Gates of Hell"
     PLUGIN_CHANNEL_CONFIGURATIONS "{2, 2}"
 )
 
@@ -27,10 +27,16 @@ target_sources(MetallicEnVerb PRIVATE
     Source/EnVerb/EVEditor.cpp
 )
 
+juce_add_binary_data(MetallicEnVerb_Assets SOURCES
+    Source/EnVerb/background.png
+)
+target_link_libraries(MetallicEnVerb PRIVATE MetallicEnVerb_Assets)
+
 target_compile_definitions(MetallicEnVerb PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_DISPLAY_SPLASH_SCREEN=0
 )
 
 target_link_libraries(MetallicEnVerb PRIVATE
