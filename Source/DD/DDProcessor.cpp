@@ -1,0 +1,360 @@
+#include "DDProcessor.h"
+#include "DDEditor.h"
+
+juce::AudioProcessorValueTreeState::ParameterLayout
+MetallicDDProcessor::createParameterLayout()
+{
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
+    using F = juce::AudioParameterFloat;
+    using B = juce::AudioParameterBool;
+    using C = juce::AudioParameterChoice;
+    using ID = juce::ParameterID;
+    using NR = juce::NormalisableRange<float>;
+    using A  = juce::AudioParameterFloatAttributes;
+
+    p.push_back(std::make_unique<F>(ID{"predelay",1}, "Pre-Delay",
+        NR(0.f,1000.f,0.5f,0.4f), 0.f, A().withLabel("ms")));
+    p.push_back(std::make_unique<F>(ID{"size",1}, "Size",
+        NR(0.f,100.f,0.5f), 99.f, A().withLabel("%")));
+    p.push_back(std::make_unique<F>(ID{"density",1}, "Scatter",
+        NR(0.f,100.f,0.5f), 0.f, A().withLabel("%")));
+    p.push_back(std::make_unique<F>(ID{"spread",1}, "Spread",
+        NR(0.f,200.f,0.5f), 200.f, A().withLabel("%")));
+    p.push_back(std::make_unique<F>(ID{"highcut",1}, "High Cut",
+        NR(1000.f,12000.f,1.f,0.4f), 12000.f, A().withLabel("Hz")));
+    p.push_back(std::make_unique<F>(ID{"lowfreq",1}, "Low Freq",
+        NR(-24.f,12.f,0.5f), 12.f, A().withLabel("dB")));
+    p.push_back(std::make_unique<F>(ID{"metal",1}, "Metallic",
+        NR(0.f,100.f,0.5f), 0.f, A().withLabel("%")));
+    p.push_back(std::make_unique<F>(ID{"resonance",1}, "Resonance",
+        NR(0.5f,2.0f,0.01f), 2.0f));
+    p.push_back(std::make_unique<F>(ID{"rate",1}, "Rate",
+        NR(0.25f,4.0f,0.01f,0.5f), 1.0f, A().withLabel("x")));
+    p.push_back(std::make_unique<F>(ID{"crossover",1}, "Crossover",
+        NR(80.f,4000.f,0.f,0.4f), 80.f, A().withLabel("Hz")));
+    p.push_back(std::make_unique<F>(ID{"shimmer",1}, "Shimmer",
+        NR(0.f,100.f,0.5f), 0.f, A().withLabel("%")));
+    p.push_back(std::make_unique<F>(ID{"sample",1}, "Sample",
+        NR(5.f,2000.f,0.5f,0.4f), 100.f, A().withLabel("ms")));
+    p.push_back(std::make_unique<F>(ID{"spray",1}, "Spray",
+        NR(1.f,8.f,1.f), 1.f));
+    p.push_back(std::make_unique<F>(ID{"position",1}, "Position",
+        NR(0.f,2000.f,0.5f,0.4f), 0.f, A().withLabel("ms")));
+    p.push_back(std::make_unique<F>(ID{"overlap",1}, "Overlap",
+        NR(0.f,100.f,0.5f), 0.f, A().withLabel("%")));
+
+    p.push_back(std::make_unique<F>(ID{"attack",1}, "Attack",
+        NR(0.f,500.f,0.5f,0.4f), 335.f, A().withLabel("ms")));
+    p.push_back(std::make_unique<F>(ID{"hold",1}, "Hold",
+        NR(0.f,1000.f,0.5f,0.4f), 247.5f, A().withLabel("ms")));
+    p.push_back(std::make_unique<F>(ID{"sustain",1}, "Sustain",
+        NR(0.f,100.f,0.5f), 71.f, A().withLabel("%")));
+    p.push_back(std::make_unique<F>(ID{"decay",1}, "Release",
+        NR(0.f,5000.f,0.5f,0.4f), 10.f, A().withLabel("ms")));
+    p.push_back(std::make_unique<C>(ID{"division",1}, "Division",
+        juce::StringArray{"1/1","1/2","1/4","1/8","1/16"}, 2));
+    p.push_back(std::make_unique<B>(ID{"gate_on",1},      "Gate On",      true));
+    p.push_back(std::make_unique<B>(ID{"reset_on_beat",1},"Reset On Beat",false));
+
+    p.push_back(std::make_unique<F>(ID{"drydel",1}, "Dry Delay",
+        NR(0.f,500.f,0.5f,0.4f), 0.f, A().withLabel("ms")));
+    p.push_back(std::make_unique<F>(ID{"dry",1}, "Dry",
+        NR(0.f,100.f,0.5f), 100.f, A().withLabel("%")));
+    p.push_back(std::make_unique<F>(ID{"wet",1}, "Wet",
+        NR(0.f,100.f,0.5f), 100.f, A().withLabel("%")));
+
+    return { p.begin(), p.end() };
+}
+
+MetallicDDProcessor::MetallicDDProcessor()
+    : AudioProcessor(BusesProperties()
+        .withInput ("Input",  juce::AudioChannelSet::stereo(), true)
+        .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts(*this, nullptr, "Parameters", createParameterLayout())
+{}
+
+MetallicDDProcessor::~MetallicDDProcessor() {}
+
+void MetallicDDProcessor::flushReverb()
+{
+    for (int i=0;i<NA;++i) { allpL[i].reset(); allpR[i].reset(); }
+    for (int i=0;i<NE;++i) { earlyL[i].reset(); earlyR[i].reset(); }
+    tankD1L.reset(); tankD1R.reset();
+    tankD2L.reset(); tankD2R.reset();
+    plateLpL = 0.f; plateLpR = 0.f;
+    plateFbL = 0.f; plateFbR = 0.f;
+    std::fill(ringBufL.begin(), ringBufL.end(), 0.f);
+    std::fill(ringBufR.begin(), ringBufR.end(), 0.f);
+    for (auto& g : grains) g.active = false;
+    for (int i = 0; i < 8; ++i) voiceTimers[i] = 0.f;
+}
+
+void MetallicDDProcessor::triggerGate(bool flush, float sustainFloor)
+{
+    phase     = ATTACK;
+    phTimer   = 0.f;
+    gateLevel = sustainFloor;
+    if (flush) flushReverb();
+}
+
+void MetallicDDProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+{
+    sr = sampleRate;
+    juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32)samplesPerBlock, 1 };
+
+    auto prep = [&](juce::dsp::DelayLine<float>& d, int maxMs)
+    {
+        d.setMaximumDelayInSamples((int)(sampleRate * maxMs / 1000.0) + 4);
+        d.prepare(spec); d.reset();
+    };
+
+    prep(pdL,1200); prep(pdR,1200);
+    prep(pdDryL,600); prep(pdDryR,600);
+    prep(allpL[0], 10);  prep(allpR[0], 10);
+    prep(allpL[1], 20);  prep(allpR[1], 15);
+    prep(allpL[2], 35);  prep(allpR[2], 45);
+    prep(allpL[3], 70);  prep(allpR[3], 100);
+    prep(tankD1L, 160); prep(tankD1R, 160);
+    prep(tankD2L, 140); prep(tankD2R, 140);
+    for (int i=0;i<NE;++i) { prep(earlyL[i],200); prep(earlyR[i],200); }
+
+    plateLpL = 0.f; plateLpR = 0.f;
+    plateFbL = 0.f; plateFbR = 0.f;
+    lfL = 0.f; lfR = 0.f;
+    xfL = 0.f; xfR = 0.f;
+    lfoPhase = 0.f;
+
+    ringBufSize = (int)(sampleRate * 3.0) + 4;
+    ringBufL.assign(ringBufSize, 0.f);
+    ringBufR.assign(ringBufSize, 0.f);
+    ringWritePos = 0;
+    for (auto& g : grains) g.active = false;
+    for (int i = 0; i < 8; ++i) voiceTimers[i] = 0.f;
+
+    phase=IDLE; gateLevel=0.f; beatTimer=0.f; phTimer=0.f;
+    wasPlaying=false;
+}
+
+void MetallicDDProcessor::releaseResources() {}
+
+void MetallicDDProcessor::processBlock(juce::AudioBuffer<float>& buffer,
+                                       juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals ndn;
+    const int NS = buffer.getNumSamples();
+    const int CH = juce::jmin(buffer.getNumChannels(), 2);
+
+    float size       = *apvts.getRawParameterValue("size")    / 100.f;
+    float scatterPct = *apvts.getRawParameterValue("density") / 100.f;
+    float spreadRaw  = *apvts.getRawParameterValue("spread")  / 100.f;
+    float spread     = juce::jmin(spreadRaw, 1.f);
+    float spreadWidth = spreadRaw;
+    float hiCut   = *apvts.getRawParameterValue("highcut");
+    float loFreq  = *apvts.getRawParameterValue("lowfreq");
+    float metal   = *apvts.getRawParameterValue("metal")   / 100.f;
+    float res     = *apvts.getRawParameterValue("resonance");
+    float atkMs   = *apvts.getRawParameterValue("attack");
+    float hldMs   = *apvts.getRawParameterValue("hold");
+    float sustainLvl = *apvts.getRawParameterValue("sustain") / 100.f;
+    float dcyMs   = *apvts.getRawParameterValue("decay");
+    int   div     = (int)*apvts.getRawParameterValue("division");
+    bool  gateOn  = *apvts.getRawParameterValue("gate_on")       > 0.5f;
+    bool  doReset = *apvts.getRawParameterValue("reset_on_beat")  > 0.5f;
+    float dryDel  = *apvts.getRawParameterValue("drydel");
+    float dryG    = *apvts.getRawParameterValue("dry") / 100.f;
+    float wetG    = *apvts.getRawParameterValue("wet") / 100.f;
+
+    int   grainLenS    = juce::jlimit(1, ringBufSize / 2,
+                           (int)(*apvts.getRawParameterValue("sample") / 1000.f * (float)sr));
+    float overlapFrac  = *apvts.getRawParameterValue("overlap") / 100.f;
+    float grainPeriodS = juce::jmax(1.f, (float)grainLenS * (1.f - overlapFrac));
+    float readRate     = juce::jlimit(0.01f, 8.f, apvts.getRawParameterValue("rate")->load());
+    float positionMs   = *apvts.getRawParameterValue("position");
+    int   positionS    = juce::jlimit(0, ringBufSize / 2,
+                           (int)(positionMs / 1000.f * (float)sr));
+
+    if (pendingFlush.exchange(false))
+    {
+        flushReverb();
+        for (int i = 0; i < 8; ++i)
+            voiceTimers[i] = grainPeriodS - 1.f;
+    }
+
+    double bpm     = 120.0;
+    bool   playing = false;
+    double ppqPos  = 0.0;
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+        {
+            if (pos->getBpm().hasValue())         bpm    = *pos->getBpm();
+            playing = pos->getIsPlaying();
+            if (pos->getPpqPosition().hasValue()) ppqPos = *pos->getPpqPosition();
+        }
+
+    if (!playing && wasPlaying)
+    {
+        beatTimer = 0.f;
+        if (phase != IDLE) { phase = DECAY; phTimer = 0.f; }
+    }
+    wasPlaying = playing;
+
+    const float dm[] = { 4.f,2.f,1.f,0.5f,0.25f };
+    beatPeriod = (float)((60.0/bpm) * sr * dm[div]);
+
+    if (playing && beatPeriod > 0.f)
+    {
+        double ppqPerGate = dm[div];
+        double posInCycle = std::fmod(ppqPos, ppqPerGate);
+        float  syncTimer  = (float)(posInCycle / ppqPerGate) * beatPeriod;
+        if (std::abs(syncTimer - beatTimer) > (float)(sr * 0.005))
+            beatTimer = syncTimer;
+    }
+
+    float atkS = (atkMs/1000.f)*(float)sr;
+    float hldS = (hldMs/1000.f)*(float)sr;
+    float dcyS = (dcyMs/1000.f)*(float)sr;
+
+    float hiCutNorm = hiCut / 12000.f;
+    float damp = juce::jlimit(0.f, 0.95f,
+        ((1.f - hiCutNorm) * 0.85f + 0.1f) * (1.f - metal * 0.7f));
+    float fbGain = juce::jlimit(0.f, 0.98f,
+        size * (0.90f + (res - 0.5f) * 0.047f));
+    int grainScatter = juce::jlimit(1, ringBufSize / 2,
+        1 + (int)((float)grainLenS * (scatterPct * 3.f + metal * 2.f)));
+
+    float dryDelSamples = juce::jmax(1.f, (dryDel/1000.f)*(float)sr);
+    pdDryL.setDelay(juce::jmin(dryDelSamples,(float)(pdDryL.getMaximumDelayInSamples()-1)));
+    pdDryR.setDelay(juce::jmin(dryDelSamples,(float)(pdDryR.getMaximumDelayInSamples()-1)));
+    float loGain = juce::Decibels::decibelsToGain(juce::jmax(-24.f, loFreq));
+
+    for (int s = 0; s < NS; ++s)
+    {
+        if (gateOn && playing)
+        {
+            beatTimer += 1.f;
+            if (beatTimer >= beatPeriod)
+            {
+                beatTimer -= beatPeriod;
+                triggerGate(doReset, sustainLvl);
+            }
+        }
+        else if (!gateOn)
+        {
+            gateLevel = 1.f;
+            phase     = IDLE;
+        }
+
+        if (gateOn && playing)
+        {
+            phTimer += 1.f;
+            switch (phase)
+            {
+                case IDLE:
+                    gateLevel = sustainLvl; break;
+                case ATTACK:
+                {
+                    float prog = atkS > 0.f ? juce::jlimit(0.f,1.f,phTimer/atkS) : 1.f;
+                    gateLevel = sustainLvl + (1.f - sustainLvl) * prog;
+                    if (phTimer >= atkS) { gateLevel=1.f; phase=HOLD; phTimer=0.f; }
+                    break;
+                }
+                case HOLD:
+                    gateLevel = 1.f;
+                    if (phTimer >= hldS) { phase=DECAY; phTimer=0.f; }
+                    break;
+                case DECAY:
+                {
+                    float t = dcyS > 0.f ? juce::jlimit(0.f,1.f,phTimer/dcyS) : 1.f;
+                    gateLevel = 1.f - (1.f - sustainLvl) * (1.f - std::exp(-4.5f * t));
+                    if (phTimer >= dcyS) { gateLevel=sustainLvl; phase=IDLE; phTimer=0.f; }
+                    break;
+                }
+            }
+        }
+
+        float inL = CH > 0 ? buffer.getSample(0,s) : 0.f;
+        float inR = CH > 1 ? buffer.getSample(1,s) : inL;
+
+        ringBufL[ringWritePos] = std::tanh(inL + plateLpL * fbGain);
+        ringBufR[ringWritePos] = std::tanh(inR + plateLpR * fbGain);
+        ringWritePos = (ringWritePos + 1) % ringBufSize;
+
+        voiceTimers[0] += 1.f;
+        if (voiceTimers[0] >= grainPeriodS)
+        {
+            voiceTimers[0] -= grainPeriodS;
+            int slot = 0, oldestPhase = -1;
+            for (int i = 0; i < MAX_GRAINS; ++i) {
+                if (!grains[i].active) { slot = i; oldestPhase = -2; break; }
+                if (grains[i].phase > oldestPhase) { oldestPhase = (int)grains[i].phase; slot = i; }
+            }
+            int minBack = (int)((float)grainLenS * juce::jmax(1.f, readRate)) + grainLenS;
+            int jitter  = grainScatter > 1 ? grainRng.nextInt(grainScatter) : 0;
+            grains[slot].readPos = (float)((ringWritePos - minBack - positionS - jitter + ringBufSize * 8) % ringBufSize);
+            grains[slot].phase   = 0.f;
+            grains[slot].active  = true;
+        }
+
+        float gL = 0.f, gR = 0.f;
+        int nActive = 0;
+        for (auto& g : grains)
+        {
+            if (!g.active) continue;
+            int p = ((int)g.readPos % ringBufSize + ringBufSize) % ringBufSize;
+            gL += ringBufL[p];
+            gR += ringBufR[p];
+            ++nActive;
+            g.readPos += readRate;
+            if (g.readPos >= (float)ringBufSize) g.readPos -= (float)ringBufSize;
+            g.phase += 1.f;
+            if (g.phase >= (float)grainLenS) g.active = false;
+        }
+        float grainNorm = nActive > 0 ? 1.f / (float)nActive : 0.f;
+        gL *= grainNorm;
+        gR *= grainNorm;
+
+        float gMono = (gL + gR) * 0.5f;
+        float aOutL = gMono*(1.f-spread) + gL*spread;
+        float aOutR = gMono*(1.f-spread) + gR*spread;
+
+        plateLpL = aOutL * (1.f - damp) + plateLpL * damp;
+        plateLpR = aOutR * (1.f - damp) + plateLpR * damp;
+
+        lfL = aOutL*0.015f + lfL*0.985f;
+        lfR = aOutR*0.015f + lfR*0.985f;
+        aOutL += lfL * (loGain - 1.f);
+        aOutR += lfR * (loGain - 1.f);
+
+        float mid  = (aOutL + aOutR) * 0.5f;
+        float side = (aOutL - aOutR) * 0.5f * spreadWidth;
+        float wetL = (mid + side) * gateLevel;
+        float wetR = (mid - side) * gateLevel;
+
+        pdDryL.pushSample(0, inL);  pdDryR.pushSample(0, inR);
+        float dryOutL = pdDryL.popSample(0);
+        float dryOutR = pdDryR.popSample(0);
+        if (CH > 0) buffer.setSample(0, s, dryOutL*dryG + wetL*wetG);
+        if (CH > 1) buffer.setSample(1, s, dryOutR*dryG + wetR*wetG);
+    }
+
+    currentGateLevel.store(gateLevel);
+}
+
+void MetallicDDProcessor::getStateInformation(juce::MemoryBlock& dest)
+{
+    auto state = apvts.copyState();
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, dest);
+}
+
+void MetallicDDProcessor::setStateInformation(const void* data, int size)
+{
+    std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(data, size));
+    if (xml && xml->hasTagName(apvts.state.getType()))
+        apvts.replaceState(juce::ValueTree::fromXml(*xml));
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new MetallicDDProcessor();
+}
